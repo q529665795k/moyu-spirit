@@ -5,6 +5,20 @@ import 'package:flutter/services.dart';
 class OverlayBridge {
   static const MethodChannel _channel = MethodChannel('moyu/spirit_overlay');
 
+  /// 悬浮窗菜单动作回调(action: feed|pet|poke|nap|taunt)
+  static void Function(String action)? onOverlayAction;
+
+  /// 监听原生悬浮窗菜单上抛的动作
+  static void listen(void Function(String action) onAction) {
+    onOverlayAction = onAction;
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'overlayAction') {
+        final action = (call.arguments as Map?)?['action'] as String? ?? '';
+        onAction(action);
+      }
+    });
+  }
+
   /// 请求悬浮窗权限, 返回是否已授权
   static Future<bool> ensurePermission() async {
     try {
