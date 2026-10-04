@@ -9,10 +9,17 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
+    companion object {
+        // 供原生悬浮窗菜单把动作上抛给 Flutter 状态机
+        @Volatile
+        var flutterChannel: MethodChannel? = null
+    }
+
     private val CHANNEL = "moyu/spirit_overlay"
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
+        flutterChannel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
                 "hasPermission" -> result.success(Settings.canDrawOverlays(this))
