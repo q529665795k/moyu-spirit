@@ -18,6 +18,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.provider.Settings
@@ -28,6 +29,8 @@ import android.view.View
 import android.view.WindowManager
 import java.util.Locale
 import java.util.Random
+import kotlin.math.abs
+import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.sin
 
@@ -35,8 +38,9 @@ import kotlin.math.sin
  * 桌面灵宠 · 悬浮窗服务(摸鱼基地原创实现)
  * 前台服务 + WindowManager 悬浮窗:
  *   - 蛋/精灵 Canvas 占位绘制(豆包素材到位后替换为序列帧)
- *   - 可拖动 / 点击冒泡 / 呼吸动画 / 睡觉 ZZZ / 爱心
- *   - 系统 TTS 语音吐槽 + 振动反馈
+ *   - 单指拖动 / 双指缩放 / 透明度调节 / 点击弹出互动菜单(喂食·摸头·戳·睡觉·吐槽)
+ *   - 菜单动作上抛 Flutter 状态机, 反馈(气泡/TTS/振动)全同步
+ *   - 呼吸动画 / 睡觉 ZZZ / 爱心
  */
 class PetOverlayService : Service(), TextToSpeech.OnInitListener {
 
@@ -62,6 +66,12 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
     /** 屏幕密度(dp 缩放), inner View 里直接使用 */
     private val density: Float
         get() = resources.displayMetrics.density
+
+    /** 窗口尺寸上下限(dp) */
+    private val minWdp = 130
+    private val minHdp = 160
+    private val maxWdp = 640
+    private val maxHdp = 800
 
     override fun onCreate() {
         super.onCreate()
@@ -107,6 +117,7 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
                 gravity = Gravity.TOP or Gravity.START
                 x = 40
                 y = 240
+                alpha = 1f
             }
             try {
                 wm.addView(view, params)
@@ -204,6 +215,25 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
             }
         }
 
+        // ---- 手势状态 ----
+        private var dragging = false
+        private var pinchUsed = false
+        private var dragStartX = 0f
+        private var dragStartY = 0f
+        private var originX = 0
+        private var originY = 0
+        private var downTime = 0L
+        private var startDist = 0f
+        private var startW = 0
+        private var startH = 0
+
+        // ---- 菜单状态 ----
+        private var menuOpen = false
+        private var settingsOpen = false
+        private val menuRects = mutableListOf<Pair<RectF, String>>()
+        private var pendingAction: String? = null
+        private var currentAlpha = 1f
+
         fun startBreathing() { mainHandler.post(animator) }
 
         override fun onDetachedFromWindow() {
@@ -211,47 +241,196 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
             mainHandler.removeCallbacks(animator)
         }
 
-        private var dragStartX = 0f
-        private var dragStartY = 0f
-        private var originX = 0
-        private var originY = 0
-        private var dragging = false
+        private fun dist(e: MotionEvent): Float {
+            if (e.pointerCount < 2) return 0f
+            val dx = e.getX(0) - e.getX(1)
+            val dy = e.getY(0) - e.getY(1)
+            return kotlin.math.sqrt(dx * dx + dy * dy)
+        }
 
         override fun onTouchEvent(event: MotionEvent): Boolean {
+            val lp = layoutParams as WindowManager.LayoutParams
             when (event.actionMasked) {
                 MotionEvent.ACTION_DOWN -> {
-                    dragging = true
-                    dragStartX = event.rawX
-                    dragStartY = event.rawY
-                    val lp = layoutParams as WindowManager.LayoutParams
-                    originX = lp.x
-                    originY = lp.y
+                    if (menuOpen) {
+                        val act = hitMenu(event.x, event.y)
+                        if (act != null) {
+                            pendingAction = act
+                        } else {
+                            closeMenu()
+                        }
+                        return true
+                    }
+                    downTime = SystemClock.uptimeMillis()
+                    if (event.pointerCount >= 2) {
+                        pinchUsed = true
+                        startDist = dist(event)
+                        startW = lp.width
+                        startH = lp.height
+                    } else {
+                        dragging = true
+                        dragStartX = event.rawX
+                        dragStartY = event.rawY
+                        originX = lp.x
+                        originY = lp.y
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_POINTER_DOWN -> {
+                    if (event.pointerCount >= 2) {
+                        pinchUsed = true
+                        startDist = dist(event)
+                        startW = lp.width
+                        startH = lp.height
+                        dragging = false
+                    }
                     return true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    if (!dragging) return true
-                    val dx = (event.rawX - dragStartX).toInt()
-                    val dy = (event.rawY - dragStartY).toInt()
-                    val lp = layoutParams as WindowManager.LayoutParams
-                    lp.x = originX + dx
-                    lp.y = originY + dy
-                    try { wm.updateViewLayout(this, lp) } catch (_: Exception) {}
+                    if (menuOpen) return true
+                    if (event.pointerCount >= 2 && startDist > 0f) {
+                        val scale = dist(event) / startDist
+                        val nw = (startW * scale).toInt().coerceIn((minWdp * density).toInt(), (maxWdp * density).toInt())
+                        val nh = (startH * scale).toInt().coerceIn((minHdp * density).toInt(), (maxHdp * density).toInt())
+                        lp.width = nw
+                        lp.height = nh
+                        try { wm.updateViewLayout(this, lp) } catch (_: Exception) {}
+                        return true
+                    }
+                    if (dragging) {
+                        val dx = (event.rawX - dragStartX).toInt()
+                        val dy = (event.rawY - dragStartY).toInt()
+                        lp.x = originX + dx
+                        lp.y = originY + dy
+                        try { wm.updateViewLayout(this, lp) } catch (_: Exception) {}
+                    }
+                    return true
+                }
+                MotionEvent.ACTION_POINTER_UP -> {
+                    if (event.pointerCount == 2) {
+                        // 剩一指 → 转回拖动
+                        val idx = event.actionIndex
+                        val other = if (idx == 0) 1 else 0
+                        dragStartX = event.getRawX(other)
+                        dragStartY = event.getRawY(other)
+                        originX = lp.x
+                        originY = lp.y
+                        dragging = true
+                        startDist = 0f
+                    }
                     return true
                 }
                 MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    if (menuOpen) {
+                        val act = pendingAction
+                        pendingAction = null
+                        if (act != null) {
+                            performAction(act)
+                            closeMenu()
+                        }
+                        return true
+                    }
+                    val moved = abs(event.rawX - dragStartX) + abs(event.rawY - dragStartY)
+                    val dt = SystemClock.uptimeMillis() - downTime
+                    if (!pinchUsed && moved < 40f && dt < 500) {
+                        openMenu()
+                    }
                     dragging = false
-                    // 移动距离小 → 视为点击
-                    val moved = kotlin.math.abs(event.rawX - dragStartX) + kotlin.math.abs(event.rawY - dragStartY)
-                    if (moved < 40f) onSpiritTap()
+                    pinchUsed = false
+                    startDist = 0f
                     return true
                 }
             }
             return super.onTouchEvent(event)
         }
 
-        private fun onSpiritTap() {
-            // 点击行为由 Flutter 状态机驱动(MainActivity 转发), 这里只做本地气泡兜底
-            if (bubble == null) showBubble("咕噜咕噜~")
+        // ---------- 互动菜单 ----------
+        private fun openMenu() {
+            menuOpen = true
+            settingsOpen = false
+            invalidate()
+        }
+
+        private fun closeMenu() {
+            menuOpen = false
+            settingsOpen = false
+            pendingAction = null
+            invalidate()
+        }
+
+        private fun menuActions(): List<String> =
+            if (settingsOpen)
+                listOf("变大", "变小", "更透明", "更实心", "返回")
+            else
+                listOf("喂食", "摸头", "戳肚", "睡觉", "吐槽", "设置")
+
+        private fun actionFor(label: String): String = when (label) {
+            "喂食" -> "feed"
+            "摸头" -> "pet"
+            "戳肚" -> "poke"
+            "睡觉" -> "nap"
+            "吐槽" -> "taunt"
+            "设置" -> "settings"
+            "变大" -> "bigger"
+            "变小" -> "smaller"
+            "更透明" -> "moreTransparent"
+            "更实心" -> "moreOpaque"
+            "返回" -> "back"
+            else -> ""
+        }
+
+        private fun hitMenu(x: Float, y: Float): String? {
+            for ((rect, act) in menuRects) {
+                if (rect.contains(x, y)) return act
+            }
+            return null
+        }
+
+        private fun performAction(action: String) {
+            when (action) {
+                "feed", "pet", "poke", "nap", "taunt" -> {
+                    // 上抛 Flutter 状态机执行(气泡/TTS/振动由状态机处理)
+                    try {
+                        MainActivity.flutterChannel?.invokeMethod(
+                            "overlayAction", mapOf("action" to action)
+                        )
+                    } catch (_: Exception) {
+                        // 桥不可用(如 App 进程被回收)时本地兜底
+                        showBubble("主人回来啦~")
+                    }
+                }
+                "settings" -> {
+                    settingsOpen = true
+                    invalidate()
+                }
+                "back" -> {
+                    settingsOpen = false
+                    invalidate()
+                }
+                "bigger", "smaller" -> {
+                    val lp = layoutParams as WindowManager.LayoutParams
+                    val ratio = lp.height.toFloat() / lp.width.toFloat()
+                    var nw = if (action == "bigger")
+                        lp.width + (36 * density).toInt()
+                    else
+                        lp.width - (36 * density).toInt()
+                    nw = nw.coerceIn((minWdp * density).toInt(), (maxWdp * density).toInt())
+                    lp.width = nw
+                    lp.height = (nw * ratio).toInt().coerceIn((minHdp * density).toInt(), (maxHdp * density).toInt())
+                    try { wm.updateViewLayout(this, lp) } catch (_: Exception) {}
+                    invalidate()
+                }
+                "moreTransparent", "moreOpaque" -> {
+                    val lp = layoutParams as WindowManager.LayoutParams
+                    currentAlpha = if (action == "moreTransparent")
+                        (currentAlpha - 0.2f).coerceAtLeast(0.25f)
+                    else
+                        (currentAlpha + 0.2f).coerceAtMost(1f)
+                    lp.alpha = currentAlpha
+                    try { wm.updateViewLayout(this, lp) } catch (_: Exception) {}
+                    invalidate()
+                }
+            }
         }
 
         override fun onDraw(canvas: Canvas) {
@@ -280,9 +459,56 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
             if (behave == "petting") {
                 drawHeart(canvas, cx + w * 0.28f, h * 0.42f, 34f * density)
             }
-            // 饿气泡
-            if (behave == "idle" && form != "egg") {
-                // 饿由 Flutter 气泡控制, 这里不画
+
+            // 互动菜单
+            if (menuOpen) {
+                drawMenu(canvas)
+            }
+        }
+
+        // ---------- 菜单绘制 ----------
+        private fun drawMenu(canvas: Canvas) {
+            menuRects.clear()
+            val w = width.toFloat()
+            val h = height.toFloat()
+            val items = menuActions()
+            val cols = 3
+            val rows = ceil(items.size.toFloat() / cols).toInt()
+            val margin = 10f * density
+            val gap = 8f * density
+            val btnH = 38f * density
+            val btnW = (w * 0.94f - margin * 2 - gap * (cols - 1)) / cols
+            val panelW = w * 0.94f
+            val panelH = margin * 2 + rows * btnH + (rows - 1) * gap
+            val left = (w - panelW) / 2f
+            val top = h * 0.04f
+
+            // 面板背景
+            val bg = Paint().apply {
+                color = Color.argb(225, 255, 255, 255)
+                setShadowLayer(10f, 0f, 3f, Color.argb(80, 0, 0, 0))
+            }
+            canvas.drawRoundRect(RectF(left, top, left + panelW, top + panelH), 16f * density, 16f * density, bg)
+
+            val btnBg = Paint().apply { color = Color.parseColor("#F3EEFF") }
+            val btnAct = Paint().apply { color = Color.parseColor("#9C8ADF") }
+            val tp = Paint().apply {
+                color = Color.parseColor("#4A3B6B")
+                textSize = 14f * density
+                isAntiAlias = true
+            }
+            for (i in items.indices) {
+                val r = i / cols
+                val c = i % cols
+                val x = left + margin + c * (btnW + gap)
+                val y = top + margin + r * (btnH + gap)
+                val rect = RectF(x, y, x + btnW, y + btnH)
+                val isSettings = settingsOpen && i == items.size - 1
+                canvas.drawRoundRect(rect, 10f * density, 10f * density, if (isSettings) btnAct else btnBg)
+                val label = items[i]
+                val tw = tp.measureText(label)
+                canvas.drawText(label, rect.centerX() - tw / 2f, rect.centerY() + tp.textSize * 0.36f, tp)
+                menuRects.add(rect to actionFor(label))
             }
         }
 
