@@ -32,7 +32,30 @@ class _HomePageState extends State<HomePage> with SingleTickerProviderStateMixin
   void initState() {
     super.initState();
     _bootstrap();
+    OverlayBridge.listen((action) => _handleOverlayAction(action));
     _uiTimer = Timer.periodic(const Duration(seconds: 2), (_) => setState(() {}));
+  }
+
+  /// 原生悬浮窗菜单动作入口
+  Future<void> _handleOverlayAction(String action) async {
+    switch (action) {
+      case 'feed':
+        await _doFeed();
+        break;
+      case 'pet':
+        await _doPet();
+        break;
+      case 'poke':
+        await _doPoke();
+        break;
+      case 'nap':
+        await _doNap();
+        break;
+      case 'taunt':
+        await _logic.tap();
+        setState(() {});
+        break;
+    }
   }
 
   Future<void> _bootstrap() async {
