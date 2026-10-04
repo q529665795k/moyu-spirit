@@ -1,7 +1,7 @@
 name: desktop_spirit
 description: 桌面灵宠 - 从一颗蛋破壳的狐耳少女桌面宠物(自用原创)
 publish_to: 'none'
-version: 0.2.0+2
+version: 0.3.0+3
 
 environment:
   sdk: '>=3.3.0 <4.0.0'
