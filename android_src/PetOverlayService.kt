@@ -59,6 +59,10 @@ class PetOverlayService : Service(), TextToSpeech.OnInitListener {
     private var ttsReady = false
     private val rnd = Random()
 
+    /** 屏幕密度(dp 缩放), inner View 里直接使用 */
+    private val density: Float
+        get() = resources.displayMetrics.density
+
     override fun onCreate() {
         super.onCreate()
         instance = this
